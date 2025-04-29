@@ -32,7 +32,6 @@
 #      鳥            (僅有詞彙)
 #      魚 6          (詞彙和詞頻，無詞性)
 
-import json
 import logging
 import re
 from pathlib import Path
@@ -106,7 +105,7 @@ def parse_srt(path: Path) -> List[Tuple[float, float]]:
     """
     entries: List[Tuple[float, float]] = []
     with path.open(encoding="utf-8") as fh:
-        lines = (l.rstrip("\n") for l in fh)
+        lines = (line_text.rstrip("\n") for line_text in fh)
         mode = 0
         for line in lines:
             if mode == 0 and line.isdigit():
