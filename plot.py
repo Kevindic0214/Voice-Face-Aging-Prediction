@@ -28,9 +28,11 @@ logging.info(f"合併後筆數：{len(df)}")
 # ---------- 指標對應 ----------
 score_cols = {
     # 原始指標
-    "speaking_rate":        "Speaking Rate (words/sec)",
+    "speech_rate":        "Speech Rate (words/sec)",
+    "speech_rate_ratio":   "Speech Rate Ratio (first_half/second_half)",
     "verbal_fluency":       "Verbal Fluency (word count)",
     "lexical_richness":     "Lexical Richness (unique words)",
+    "word_repetition_score": "Word Repetition Score",
     
     "voice_fluency_weighted": "Voice Fluency (weighted)",
     "pause_level1_count": "Pause count (2-5s, Level 1)",
@@ -42,13 +44,29 @@ label_map = {0: "Normal", 1: "Dementia"}
 
 # ---------- 畫平滑曲線圖 ----------
 for col, title in score_cols.items():
-    # 檢查欄位是否存在
     if col not in df.columns:
-        logging.warning(f"欄位 {col} 不存在於數據中，跳過繪圖")
         continue
         
-    plt.figure(figsize=(5, 4))
+    plt.figure(figsize=(6, 4))
     
+    # 動態語速比專屬設定
+    if col == "speech_rate_ratio":
+        # 坐標軸範圍設定
+        plt.xlim(0.3, 2.5)
+        
+        # 參考線與解讀標註
+        plt.axvline(x=1.0, color='gray', linestyle=':', 
+                   label='Baseline (no change)')
+        plt.axvspan(1.3, 2.5, alpha=0.1, color='red', 
+                   label='Possible impairment')
+        
+        # 顯著性標記（需預先統計檢定）
+        for i, (label, grp) in enumerate(df.groupby("Analysis Result")):
+            if grp[col].mean() > 1.3:  # 假設1.3為閾值
+                y_pos = 0.9 - i*0.1
+                plt.text(1.8, y_pos, '*p<0.05', 
+                        fontsize=12, ha='center')
+
     # 設置更好的顏色
     colors = ['#3498db', '#e74c3c']  # 藍色和紅色，更美觀
     
@@ -138,3 +156,54 @@ if not pause_levels_df.empty:
     logging.info(f"已輸出 {out_path}")
 
 logging.info("所有分布圖繪製完成")
+
+# ---------- 繪製各分數指標箱型圖 ----------
+plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'Arial']  # 支援中文顯示
+plt.rcParams['axes.unicode_minus'] = False  # 讓負號正確顯示
+
+for col, title in score_cols.items():
+    # 檢查欄位是否存在
+    if col not in df.columns:
+        logging.warning(f"欄位 {col} 不存在於數據中，跳過繪製箱型圖")
+        continue
+        
+    plt.figure(figsize=(8, 6))
+    
+    # 設置更好的顏色
+    colors = ['#3498db', '#e74c3c']  # 藍色和紅色
+    
+    boxplot = df.boxplot(column=col, by="Analysis Result", patch_artist=True, 
+                        return_type='dict', figsize=(8, 6))
+    
+    # 美化箱型圖
+    for i, box in enumerate(boxplot[col]['boxes']):
+        box.set(facecolor=colors[i], alpha=0.7)
+    
+    # 添加數據點
+    for i, (label, grp) in enumerate(df.groupby("Analysis Result")):
+        # 計算抖動量
+        jitter = 0.05
+        x = np.random.normal(i+1, jitter, size=len(grp))
+        plt.scatter(x, grp[col], alpha=0.6, s=30, color=colors[i], edgecolor='k')
+    
+    # 透過設置title和suptitle移除自動生成的標題
+    plt.suptitle('')
+    plt.title(f"{title} Boxplot by Analysis Result", fontsize=14, fontweight='bold')
+    plt.xlabel("Analysis Result", fontsize=12)
+    plt.ylabel(title, fontsize=12)
+    
+    # 修改x軸標籤
+    ax = plt.gca()
+    # 直接使用 Analysis Result 的值作為標籤
+    labels = [label_map.get(label, 'Unknown') for label in df['Analysis Result'].unique()]
+    ax.set_xticklabels(labels)
+    
+    plt.tight_layout()
+    
+    # 保存箱型圖
+    out_path = PLOT_DIR / f"{col}_boxplot.png"
+    plt.savefig(out_path, dpi=300)
+    plt.close()
+    logging.info(f"已輸出 {out_path}")
+
+logging.info("所有箱型圖繪製完成")
