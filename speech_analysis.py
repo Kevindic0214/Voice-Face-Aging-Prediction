@@ -1,9 +1,46 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+研究背景：
+- 受試者會在固定1分鐘內觀看圖卡，並說出繁體中文動物名稱
+- 錄音內容為受試者的即時中文語言反應
+- 分析目標：從語速、停頓、詞彙重複等特徵鑑別認知功能狀態
+"""
+
+# ----------------------------------------------------------------------
+# 輸入文件格式說明
+# ----------------------------------------------------------------------
+# 1. .txt 文件：
+#    - 純文字，無多餘標記（例如：無標題、無分段）。
+#    - 只有一行內容，例如："貓 狗 鳥 貓 魚 狗"
+#
+# 2. .srt 文件：
+#    - 標準字幕格式，範例如下：
+#      1
+#      00:00:01,000 --> 00:00:03,500
+#      貓
+#      
+#      2
+#      00:00:04,000 --> 00:00:06,000
+#      狗
+#
+# 3. animal_list.txt：
+#    - 一行一個動物名稱，可以包含詞頻和詞性（選填）。
+#    - 範例格式：
+#      貓 10 n       (完整格式：詞彙 詞頻 詞性)
+#      狗 8 n        (完整格式)
+#      鳥            (僅有詞彙)
+#      魚 6          (詞彙和詞頻，無詞性)
+
 import json
 import logging
 import re
 from pathlib import Path
 from typing import List, Tuple
+from collections import Counter
 
+import numpy as np
+import pandas as pd
 import jieba
 
 # ----------------------------------------------------------------------
@@ -14,8 +51,9 @@ logging.basicConfig(
     format="[%(levelname)s] %(message)s"
 )
 
-WINDOW_SEC = 59.0                # 錄音長度
+WINDOW_SEC = 59.0                # 錄音長度（固定為59秒）
 PAUSE_TH = 2.0                   # 停頓門檻
+MATTR_WINDOW: int = 20            # MATTR 滑動視窗大小
 
 # 停頓加權設定
 PAUSE_WEIGHT = {
@@ -30,7 +68,7 @@ STOPWORDS = {
     "這個", "那個", "這些", "那些", "一個", "一些", "兩個", "幾個",
     "每個", "每一個", "所有", "任何", "任何人", "誰", "什麼", "哪個",
     "哪裡", "怎麼", "怎樣", "為什麼", "怎麼樣", "為什麼要", "怎麼會",
-    "也", "還", "而且", "不過", "但是", "雖然", "很多", "還有", "有些", "繼續",
+    "也", "還", "而且", "不過", "但是", "雖然", "很多", "有些", "繼續",
     # 口語填充
     "嗯", "呃", "欸", "啊", "哇", "嘛", "吧", "呢",
     "然後", "就是", "嘿", "哈", "嗯哼", "好像", "對啊", "對不對",
@@ -58,6 +96,14 @@ def ts2sec(ts: str) -> float:
 # 只取 (start, end) 時間
 # ----------------------------------------------------------------------
 def parse_srt(path: Path) -> List[Tuple[float, float]]:
+    """解析標準 SRT 字幕文件，提取時間戳 (start, end)。
+    
+    文件格式：
+    - 序號
+    - 時間戳（格式：HH:MM:SS,mmm --> HH:MM:SS,mmm）
+    - 文字內容
+    - 空白行分隔
+    """
     entries: List[Tuple[float, float]] = []
     with path.open(encoding="utf-8") as fh:
         lines = (l.rstrip("\n") for l in fh)
@@ -81,6 +127,12 @@ def parse_srt(path: Path) -> List[Tuple[float, float]]:
 # 讀取 ASR 文字
 # ----------------------------------------------------------------------
 def read_txt(path: Path) -> str:
+    """讀取純文字文件，內容為一行且無多餘標記。
+    
+    範例：
+    - 輸入文件內容：「貓 狗 鳥 貓 魚 狗」
+    - 輸出：「貓 狗 鳥 貓 魚 狗」
+    """
     txt = path.read_text(encoding="utf-8").replace("\u3000", " ").strip()
     logging.debug(f"{path.name}: 文字長度 {len(txt)} 字元")
     return txt
@@ -94,8 +146,6 @@ def tokenize(text: str, keep_stopwords: bool) -> List[str]:
     tokens = jieba.lcut(text, cut_all=False, HMM=True)
     # 過濾標點和空白
     tokens = [w for w in tokens if w not in PUNCTS and w.strip()]
-    # 提取核心詞
-    # tokens = extract_core_words(tokens)
     # 根據需要過濾停用詞
     if not keep_stopwords:
         tokens = [w for w in tokens if w not in STOPWORDS]
@@ -107,13 +157,31 @@ def tokenize(text: str, keep_stopwords: bool) -> List[str]:
 # 動物詞典相關功能
 # ----------------------------------------------------------------------
 def load_animals(animal_file: Path = Path("animal_list.txt")) -> set:
-    """從檔案載入動物詞典作為分詞的補充字典"""
+    """從檔案載入動物詞典作為分詞的補充字典。
+    
+    檔案格式：
+    - 每行一個動物名稱，可以包含詞頻和詞性（選填）。
+    - 範例：
+        貓 10 n       (完整格式：詞彙 詞頻 詞性)
+        狗 8 n        (完整格式)
+        鳥            (僅有詞彙)
+        魚 6          (詞彙和詞頻，無詞性)
+    """
     if not animal_file.exists():
         logging.error(f"找不到動物詞典檔案: {animal_file}")
         return set()
     
+    animals = set()
     with animal_file.open('r', encoding='utf-8') as f:
-        animals = {line.strip() for line in f if line.strip()}
+        for line in f:
+            if not line.strip():
+                continue
+            
+            # 分割每行並至少取第一欄（動物名稱）
+            parts = line.strip().split()
+            if parts:  # 確保行不為空
+                animal_name = parts[0]
+                animals.add(animal_name)
     
     # 將動物名稱添加到jieba詞典中以提高分詞準確度
     for animal in animals:
@@ -122,6 +190,17 @@ def load_animals(animal_file: Path = Path("animal_list.txt")) -> set:
     logging.debug(f"已載入 {len(animals)} 種動物詞到分詞字典")
     return animals
 
+# ----------------------------------------------------------------------
+# MATTR implementation
+# ----------------------------------------------------------------------
+
+def mattr(tokens: List[str], window: int = MATTR_WINDOW) -> float:
+    """Moving‑Average TTR. Returns NaN if tokens shorter than window."""
+    n = len(tokens)
+    if n < window:
+        return float("nan")
+    ttrs = [len(set(tokens[i:i + window])) / window for i in range(0, n - window + 1)]
+    return float(np.mean(ttrs))
 
 # ----------------------------------------------------------------------
 # 核心計算
@@ -135,7 +214,7 @@ def calc_metrics(txt_path: Path, srt_path: Path) -> dict:
     text = read_txt(txt_path)
 
     # 載入動物詞典作為分詞補充字典
-    animals = load_animals()
+    load_animals()
     
     raw_tokens = tokenize(text, keep_stopwords=True)
     filt_tokens = tokenize(text, keep_stopwords=False)
@@ -148,23 +227,41 @@ def calc_metrics(txt_path: Path, srt_path: Path) -> dict:
 
     actual_speaking_time = speaking_duration(segs)
 
+    # 計算所有停頓（段間、開頭、結尾）
+    pauses: list[float] = []
+    
+    # 1. 開頭沉默時間（從錄音開始到第一段說話）
+    first_gap = segs[0][0] - 0.0
+    if first_gap > PAUSE_TH:
+        pauses.append(first_gap)
+    
+    # 2. 段間停頓
     internal_gaps = [
         segs[i + 1][0] - segs[i][1]            # 段與段之間
         for i in range(len(segs) - 1)
     ]
-    pauses = [g for g in internal_gaps if g > PAUSE_TH]
-    total_pause_time = sum(pauses)
-
-    # 以真實發聲時間計算 Speaking Rate
-    sr = len(raw_tokens) / max(actual_speaking_time, 1.0)
-
-    verbal_fluency = len(filt_tokens)
-    lr = len(set(filt_tokens))
-
-    # 計算加權VF
-    vf_total = len(pauses)  # 原始VF（停頓總數）
+    pauses.extend([g for g in internal_gaps if g > PAUSE_TH])
     
-    # 新的加權計算
+    # 3. 結尾沉默時間（從最後一段說話到錄音結束）
+    last_gap = WINDOW_SEC - segs[-1][1]
+    if last_gap > PAUSE_TH:
+        pauses.append(last_gap)
+    
+    # 總停頓與總說話時間
+    total_pause_time = sum(pauses)
+    total_time = actual_speaking_time + total_pause_time
+
+    # 計算語速
+    sr = len(filt_tokens) / max(total_time, 1.0)
+
+    # 計算詞彙多樣性指標
+    ld_mattr = mattr(filt_tokens, window=MATTR_WINDOW)
+
+    # 計算詞彙重複率
+    word_counts = Counter(filt_tokens)
+    repetition_score = sum(cnt > 1 for cnt in word_counts.values()) / len(word_counts) if word_counts else 0
+
+    # 加權計算停頓影響
     vf_weighted = 0
     vf_counts = {"level1": 0, "level2": 0, "level3": 0}
     
@@ -179,26 +276,30 @@ def calc_metrics(txt_path: Path, srt_path: Path) -> dict:
             vf_weighted += PAUSE_WEIGHT["level3"]["weight"]
             vf_counts["level3"] += 1
 
-    logging.debug(f"原始詞數 (raw_tokens): {len(raw_tokens)}")
-    logging.debug(f"前 30 個原始詞: {raw_tokens[:30]}")
-    logging.debug(f"去停用詞後詞數 (filtered): {verbal_fluency}")
-    logging.debug(f"前 30 個過濾後詞: {filt_tokens[:30]}")
-    logging.debug(f"不同詞數 (LR): {lr}")
-    logging.debug(f"前 30 個不同詞: {list(set(filt_tokens))[:30]}")
-    logging.debug(f"所有 gap: {pauses}")
-    logging.debug(f"停頓 (> {PAUSE_TH}s) 個數: {len(pauses)}")
-    logging.debug(f"各停頓長度: {pauses}")
-    logging.debug(f"總停頓時間: {total_pause_time} 秒")
-    logging.debug(f"實際發聲時間: {actual_speaking_time} 秒")
-    logging.debug(f"停頓分布 - 輕度(2-5s): {vf_counts['level1']}, 中度(5-10s): {vf_counts['level2']}, 嚴重(>10s): {vf_counts['level3']}")
-    logging.debug(f"加權後VF: {vf_weighted}")
+    # 計算前後半段語速差異
+    half_idx = len(raw_tokens) // 2
+    first_half_tokens = raw_tokens[:half_idx]
+    second_half_tokens = raw_tokens[half_idx:]
+    
+    # 假設停頓均勻分布於前後半段
+    half_time = total_time / 2
+    
+    sr_first_half = len(first_half_tokens) / max(half_time, 0.1)  # 避免除以0
+    sr_second_half = len(second_half_tokens) / max(half_time, 0.1)
+    
+    # 語速比（>1表示後半段變慢）
+    speech_rate_ratio = sr_first_half / max(sr_second_half, 0.1)
 
-    # 只在CSV中輸出我們需要的指標
+    # 語言流暢度 (verbal fluency)
+    vf = len(filt_tokens)
+
     return {
-        "speaking_rate": round(sr, 4),
-        "verbal_fluency": verbal_fluency,
-        "lexical_richness": lr,
-        "voice_fluency_pauses": vf_total,
+        "speech_rate": round(sr, 4),
+        "speech_rate_ratio": round(speech_rate_ratio, 2),
+        "verbal_fluency": vf,
+        f"lexical_diversity_mattr{MATTR_WINDOW}": round(ld_mattr, 4) if not np.isnan(ld_mattr) else np.nan,
+        "word_repetition_score": round(repetition_score, 4),
+        "voice_fluency_pauses": len(pauses),
         "voice_fluency_weighted": vf_weighted,
         "pause_level1_count": vf_counts["level1"],
         "pause_level2_count": vf_counts["level2"],
@@ -227,10 +328,8 @@ def calc_metrics(txt_path: Path, srt_path: Path) -> dict:
 #     print(json.dumps(scores, ensure_ascii=False, indent=2))
 
 # ----------------------------------------------------------------------
-# 批次處理所有受試者
+# Batch processing utilities
 # ----------------------------------------------------------------------
-import pandas as pd
-
 def batch_process(txt_dir: Path, srt_dir: Path, out_csv: Path):
     """掃描 txt_dir 下所有 *.txt，批次計算指標並存 CSV"""
     records = []
@@ -243,7 +342,7 @@ def batch_process(txt_dir: Path, srt_dir: Path, out_csv: Path):
         scores = calc_metrics(txt_path, srt_path)
         scores["subject_id"] = sid
         records.append(scores)
-        logging.info(f"{sid}: 完成計算 → {scores}")
+        logging.debug(f"{sid}: 完成計算 → {scores}")
 
     if not records:
         logging.error("整個資料夾沒有任何有效檔案！")
@@ -256,7 +355,7 @@ def batch_process(txt_dir: Path, srt_dir: Path, out_csv: Path):
     print(df)
 
 # ----------------------------------------------------------------------
-# 直接執行批次（可視需求關掉單人測試）
+# CLI entry point
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
     TXT_DIR = Path("data/txt")
