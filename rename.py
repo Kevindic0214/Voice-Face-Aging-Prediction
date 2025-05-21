@@ -1,7 +1,7 @@
 import os
 
 # 設定你的資料夾路徑
-folder_path = r'D:\NYCU\SARC LAB\Voice-Face-Aging-Prediction\逐字稿'
+folder_path = r'C:\kevin\Voice-Face-Aging-Prediction\逐字稿'
 
 # 走訪資料夾內所有 .txt 檔案
 for filename in os.listdir(folder_path):
