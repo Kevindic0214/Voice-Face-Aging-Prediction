@@ -18,11 +18,11 @@
 #    - 標準字幕格式，範例如下：
 #      1
 #      00:00:01,000 --> 00:00:03,500
-#      貓
+#      貓狗
 #      
 #      2
 #      00:00:04,000 --> 00:00:06,000
-#      狗
+#      牛羊老虎
 #
 # 3. animal_list.txt：
 #    - 一行一個動物名稱，可以包含詞頻和詞性（選填）。
@@ -37,7 +37,7 @@ import re
 from pathlib import Path
 from typing import List, Tuple
 from collections import Counter
-
+import json
 import numpy as np
 import pandas as pd
 import jieba
@@ -46,7 +46,7 @@ import jieba
 # 基本設定
 # ----------------------------------------------------------------------
 logging.basicConfig(
-    level=logging.INFO,                  # ← 想看更少請改 INFO
+    level=logging.DEBUG,
     format="[%(levelname)s] %(message)s"
 )
 
@@ -215,7 +215,6 @@ def calc_metrics(txt_path: Path, srt_path: Path) -> dict:
     # 載入動物詞典作為分詞補充字典
     load_animals()
     
-    raw_tokens = tokenize(text, keep_stopwords=True)
     filt_tokens = tokenize(text, keep_stopwords=False)
 
     # ---------- 停頓部份 ----------
@@ -236,7 +235,7 @@ def calc_metrics(txt_path: Path, srt_path: Path) -> dict:
     
     # 2. 段間停頓
     internal_gaps = [
-        segs[i + 1][0] - segs[i][1]            # 段與段之間
+        segs[i + 1][0] - segs[i][1] # 段與段之間
         for i in range(len(segs) - 1)
     ]
     pauses.extend([g for g in internal_gaps if g > PAUSE_TH])
@@ -251,7 +250,7 @@ def calc_metrics(txt_path: Path, srt_path: Path) -> dict:
     total_time = actual_speaking_time + total_pause_time
 
     # 計算語速
-    sr = len(filt_tokens) / max(total_time, 1.0)
+    sr = len(filt_tokens) / total_time if total_time > 0 else float('nan')
 
     # 計算詞彙多樣性指標
     ld_mattr = mattr(filt_tokens, window=MATTR_WINDOW)
@@ -275,26 +274,11 @@ def calc_metrics(txt_path: Path, srt_path: Path) -> dict:
             vf_weighted += PAUSE_WEIGHT["level3"]["weight"]
             vf_counts["level3"] += 1
 
-    # 計算前後半段語速差異
-    half_idx = len(raw_tokens) // 2
-    first_half_tokens = raw_tokens[:half_idx]
-    second_half_tokens = raw_tokens[half_idx:]
-    
-    # 假設停頓均勻分布於前後半段
-    half_time = total_time / 2
-    
-    sr_first_half = len(first_half_tokens) / max(half_time, 0.1)  # 避免除以0
-    sr_second_half = len(second_half_tokens) / max(half_time, 0.1)
-    
-    # 語速比（>1表示後半段變慢）
-    speech_rate_ratio = sr_first_half / max(sr_second_half, 0.1)
-
     # 語言流暢度 (verbal fluency)
     vf = len(filt_tokens)
 
     return {
         "speech_rate": round(sr, 4),
-        "speech_rate_ratio": round(speech_rate_ratio, 2),
         "verbal_fluency": vf,
         f"lexical_diversity_mattr{MATTR_WINDOW}": round(ld_mattr, 4) if not np.isnan(ld_mattr) else np.nan,
         "word_repetition_score": round(repetition_score, 4),
@@ -311,20 +295,20 @@ def calc_metrics(txt_path: Path, srt_path: Path) -> dict:
 # ----------------------------------------------------------------------
 # 手動指定受試者 ID
 # ----------------------------------------------------------------------
-# SUBJECT_ID = "0005"
-# TXT_DIR = Path("data/txt")
-# SRT_DIR = Path("data/srt")
+SUBJECT_ID = "0021"
+TXT_DIR = Path("data/txt")
+SRT_DIR = Path("data/srt")
 
-# txt_file = TXT_DIR / f"{SUBJECT_ID}.txt"
-# srt_file = SRT_DIR / f"{SUBJECT_ID}.srt"
+txt_file = TXT_DIR / f"{SUBJECT_ID}.txt"
+srt_file = SRT_DIR / f"{SUBJECT_ID}.srt"
 
-# if not txt_file.exists():
-#     logging.error(f"{txt_file} 不存在！")
-# elif not srt_file.exists():
-#     logging.error(f"{srt_file} 不存在！")
-# else:
-#     scores = calc_metrics(txt_file, srt_file)
-#     print(json.dumps(scores, ensure_ascii=False, indent=2))
+if not txt_file.exists():
+    logging.error(f"{txt_file} 不存在！")
+elif not srt_file.exists():
+    logging.error(f"{srt_file} 不存在！")
+else:
+    scores = calc_metrics(txt_file, srt_file)
+    print(json.dumps(scores, ensure_ascii=False, indent=2))
 
 # ----------------------------------------------------------------------
 # Batch processing utilities
@@ -356,9 +340,9 @@ def batch_process(txt_dir: Path, srt_dir: Path, out_csv: Path):
 # ----------------------------------------------------------------------
 # CLI entry point
 # ----------------------------------------------------------------------
-if __name__ == "__main__":
-    TXT_DIR = Path("data/txt")
-    SRT_DIR = Path("data/srt")
-    OUT_CSV = Path("batch_metrics.csv")
+# if __name__ == "__main__":
+#     TXT_DIR = Path("data/txt")
+#     SRT_DIR = Path("data/srt")
+#     OUT_CSV = Path("batch_metrics.csv")
 
-    batch_process(TXT_DIR, SRT_DIR, OUT_CSV)
+#     batch_process(TXT_DIR, SRT_DIR, OUT_CSV)
